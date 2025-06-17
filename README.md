@@ -48,7 +48,9 @@ type WifiInfoData = {
 ```
 
 ##### WifiInfo.addChangeListener(listener: (data: WifiInfoData) => void): { remove: () => void }
-
+```
+为了确保准确性，原生层使用轮询方式获取 Wi-Fi 变更信息，间隔为 1 秒。
+```
 监听 Wi-Fi 信息变化（如网络切换）。
 返回：
 - `remove`: 移除监听器的函数。
