@@ -1,8 +1,8 @@
 # react-native-wifi-info
 
-A React Native module to access current Wi-Fi information (SSID, BSSID, IP address) for both iOS and Android.
+一个简单、跨平台的 React Native 原生模块，用于获取当前设备连接的 Wi-Fi SSID、BSSID 和本机 IP 地址，支持变更监听。
 
-## Installation
+## 安装
 
 ```sh
 yarn add react-native-wifi-info
@@ -38,7 +38,7 @@ yarn add react-native-wifi-info
 ##### WifiInfo.getCurrentWifiInfo(): Promise<WifiInfoData | null>
 
 获取当前 Wi-Fi 信息。
-返回：
+返回（无权限时返回 null）：
 ```ts
 type WifiInfoData = {
   ssid: string;
