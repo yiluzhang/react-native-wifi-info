@@ -1,5 +1,6 @@
 #import "WifiInfo.h"
 #import <SystemConfiguration/CaptiveNetwork.h>
+#import <NetworkExtension/NetworkExtension.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <net/if.h>
@@ -10,6 +11,7 @@
   NSInteger _observerCount;
   NSDictionary *_lastInfo;
   CLLocationManager *_locationManager;
+  BOOL _hasRequestedPermission;
 }
 
 RCT_EXPORT_MODULE();
@@ -18,9 +20,23 @@ RCT_EXPORT_MODULE();
   return @[@"onWifiInfoChanged"];
 }
 
++ (BOOL)requiresMainQueueSetup {
+  return YES;
+}
+
+- (instancetype)init {
+  if (self = [super init]) {
+    _hasRequestedPermission = NO;
+    _locationManager = [[CLLocationManager alloc] init];
+  }
+  return self;
+}
+
 RCT_EXPORT_METHOD(getCurrentWifiInfo:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
+  [self requestLocationPermissionIfNeeded];
+  
   if (![self hasLocationPermission]) {
     resolve((id)kCFNull);
     return;
@@ -74,30 +90,116 @@ RCT_EXPORT_METHOD(stopObserve) {
   }
 }
 
+- (void)requestLocationPermissionIfNeeded {
+  if (_hasRequestedPermission) {
+    return;
+  }
+  
+  CLAuthorizationStatus status;
+  if (@available(iOS 14.0, *)) {
+    status = _locationManager.authorizationStatus;
+  } else {
+    status = [CLLocationManager authorizationStatus];
+  }
+  
+  if (status == kCLAuthorizationStatusNotDetermined) {
+    _hasRequestedPermission = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self->_locationManager requestWhenInUseAuthorization];
+    });
+  }
+}
+
 - (BOOL)hasLocationPermission {
   if (!_locationManager) {
     _locationManager = [[CLLocationManager alloc] init];
   }
 
-  CLAuthorizationStatus status = _locationManager.authorizationStatus;
+  CLAuthorizationStatus status;
+  if (@available(iOS 14.0, *)) {
+    status = _locationManager.authorizationStatus;
+  } else {
+    status = [CLLocationManager authorizationStatus];
+  }
 
   return status == kCLAuthorizationStatusAuthorizedWhenInUse ||
          status == kCLAuthorizationStatusAuthorizedAlways;
 }
 
 - (NSDictionary *)fetchWifiInfo {
+  // 先检查权限状态
+  CLAuthorizationStatus status;
+  if (@available(iOS 14.0, *)) {
+    status = _locationManager.authorizationStatus;
+  } else {
+    status = [CLLocationManager authorizationStatus];
+  }
+  NSLog(@"[WifiInfo] Location permission status: %d (0=NotDetermined, 3=WhenInUse, 4=Always)", (int)status);
+  
+  // iOS 14+ 优先使用新 API
+  if (@available(iOS 14.0, *)) {
+    NSLog(@"[WifiInfo] iOS 14+ detected, trying NEHotspotNetwork API first...");
+    __block NSDictionary *result = nil;
+    __block BOOL completed = NO;
+    
+    [NEHotspotNetwork fetchCurrentWithCompletionHandler:^(NEHotspotNetwork * _Nullable network) {
+      if (network) {
+        NSLog(@"[WifiInfo] ✅ NEHotspotNetwork success: SSID=%@, BSSID=%@", network.SSID, network.BSSID);
+        NSString *ip = [self getIPAddress];
+        result = @{
+          @"ssid": network.SSID ?: @"",
+          @"bssid": network.BSSID ?: @"",
+          @"ip": ip ?: @""
+        };
+      } else {
+        NSLog(@"[WifiInfo] ⚠️ NEHotspotNetwork returned nil, falling back to CNCopyCurrentNetworkInfo");
+      }
+      completed = YES;
+    }];
+    
+    // 等待异步回调（最多1秒）
+    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:1.0];
+    while (!completed && [timeout timeIntervalSinceNow] > 0) {
+      [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+    
+    if (result) {
+      return result;
+    }
+  }
+  
+  // 回退到旧 API
+  NSLog(@"[WifiInfo] Using legacy CNCopyCurrentNetworkInfo API...");
   NSArray *interfaces = (__bridge_transfer id)CNCopySupportedInterfaces();
+  
+  if (!interfaces || interfaces.count == 0) {
+    NSLog(@"[WifiInfo] No supported interfaces found");
+    return @{
+      @"ssid": @"",
+      @"bssid": @"",
+      @"ip": @""
+    };
+  }
+  
+  NSLog(@"[WifiInfo] Found %lu interface(s): %@", (unsigned long)interfaces.count, interfaces);
+  
   NSDictionary *networkInfo = nil;
 
   for (NSString *interfaceName in interfaces) {
-    networkInfo = (__bridge_transfer id)CNCopyCurrentNetworkInfo((__bridge CFStringRef)interfaceName);
-    if (networkInfo && networkInfo.count > 0) {
-      networkInfo = [networkInfo copy];
+    NSDictionary *info = (__bridge_transfer id)CNCopyCurrentNetworkInfo((__bridge CFStringRef)interfaceName);
+    NSLog(@"[WifiInfo] Interface '%@' returned: %@", interfaceName, info ?: @"(null)");
+    
+    if (info && info.count > 0) {
+      networkInfo = [info copy];
+      NSLog(@"[WifiInfo] ✅ Found network info on interface %@: SSID=%@, BSSID=%@", 
+            interfaceName, networkInfo[@"SSID"], networkInfo[@"BSSID"]);
       break;
     }
   }
   
   if (!networkInfo || !networkInfo[@"BSSID"] || [networkInfo[@"BSSID"] isKindOfClass:[NSNull class]]) {
+    NSLog(@"[WifiInfo] ❌ No valid network info found (not connected to WiFi or missing permissions)");
+    NSLog(@"[WifiInfo] Troubleshooting: Check 1) Location permission granted? 2) Access WiFi Information capability enabled? 3) Connected to WiFi?");
     return @{
       @"ssid": @"",
       @"bssid": @"",
